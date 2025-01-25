@@ -83,6 +83,11 @@ function preSanitizeHtml($html) {
     return $html;
 }
 
+// Windows cannot handle folder and file names with : in them
+function formatTimestamp($timestamp) {
+    return date('Y-m-d-H-i-s', strtotime($timestamp));
+}
+
 // Function to fetch mailboxes and prompt for selection
 function selectMailbox($accessToken) {
     $client = new Client([
@@ -136,8 +141,26 @@ function fetchTags($conversation) {
     return implode(', ', $tags);
 }
 
+// Function to fetch threads for a given conversation
+function fetchThreads($conversationId, $accessToken) {
+    echo "Fetching threads...\n";
+
+    $client = new Client([
+        'base_uri' => 'https://api.helpscout.net/v2/',
+        'headers' => [
+            'Authorization' => 'Bearer ' . $accessToken,
+            'Content-Type' => 'application/json',
+        ],
+    ]);
+
+    $response = $client->get("conversations/{$conversationId}/threads");
+    return json_decode($response->getBody(), true)['_embedded']['threads'] ?? [];
+}
+
 // Function to fetch conversations from HelpScout within the specified date range and stream to CSV
 function fetchAndStreamConversations($startDate, $endDate, $accessToken, $filename, $selectedMailboxId) {
+    echo "\n\nFetching conversations...\n";
+
     $client = new Client([
         'base_uri' => 'https://api.helpscout.net/v2/',
         'headers' => [
@@ -147,29 +170,45 @@ function fetchAndStreamConversations($startDate, $endDate, $accessToken, $filena
     ]);
 
     $page = 1;
+    $exportPath = __DIR__ . '/conversations';
+    if (!file_exists($exportPath)) {
+        mkdir($exportPath, 0777, true);
+    }
 
     // Open the file for writing
     $fp = fopen($filename, 'w');
     $headerWritten = false;
+    $total_pages = null;
+    $total_elements = null;
 
     do {
+        if ($total_pages === null) {
+            echo "Processing the first page...\n";
+        } else {
+            echo "Processing page $page of $total_pages, containing $total_elements...\n";
+        }
+        
+        $query = [
+            'query' => "(createdAt:[{$startDate}T00:00:00Z TO {$endDate}T23:59:59Z])",
+            'status' => 'all',
+            'page' => $page,
+            'sortField' => 'createdAt',
+            'embed' => 'threads',
+            'sortOrder' => 'desc',
+        ];
+
+        if ($selectedMailboxId !== 'all') {
+            $query['mailbox'] = $selectedMailboxId['id'];
+        }
+
         $response = $client->get('conversations', [
-            'query' => [
-                'query' => "(createdAt:[{$startDate}T00:00:00Z TO {$endDate}T23:59:59Z])",
-                'status' => 'all',
-                'page' => $page,
-                'embed' => 'threads',
-            ],
+            'query' => $query,
         ]);
         
         $data = json_decode($response->getBody(), true);
         
         if (isset($data['_embedded']['conversations'])) {
             foreach ($data['_embedded']['conversations'] as $conversation) {
-                if ($selectedMailboxId !== 'all' && $conversation['mailboxId'] != $selectedMailboxId['id']) {
-                    continue; // Skip conversations from other mailboxes
-                }
-
                 // Exclude conversations tagged as "spam" or "discard"
                 $tags = [];
                 if (isset($conversation['tags']) && is_array($conversation['tags'])) {
@@ -181,18 +220,41 @@ function fetchAndStreamConversations($startDate, $endDate, $accessToken, $filena
                     continue;
                 }
 
-                $createdAt = $conversation['_embedded']['threads'][0]['createdAt'] ?? $conversation['createdAt'] ?? '';
+                $customerName = trim(($conversation['primaryCustomer']['first'] ?? '') . ' ' . ($conversation['primaryCustomer']['last'] ?? ''));
+                $customerName = preg_replace('/[^a-zA-Z0-9_ -]/', '', $customerName); // Sanitize name
+                $createdAt = formatTimestamp($conversation['_embedded']['threads'][0]['createdAt'] ?? $conversation['createdAt'] ?? '');
+                $conversationId = $conversation['id'];
 
+                // Create folder for conversation
+                $conversationFolder = "{$exportPath}/{$conversationId}_{$customerName}_{$createdAt}";
+                if (!file_exists($conversationFolder)) {
+                    mkdir($conversationFolder, 0777, true);
+                }
+
+                // Fetch and export threads
+                $threads = fetchThreads($conversationId, $accessToken);
+                foreach ($threads as $thread) {
+                    $creator = trim(($thread['createdBy']['first'] ?? '') . ' ' . ($thread['createdBy']['last'] ?? ''));
+                    $creator = preg_replace('/[^a-zA-Z0-9_ -]/', '', $creator); // Sanitize creator name
+                    $threadId = $thread['id'];
+                    $threadCreatedAt = formatTimestamp($thread['createdAt'] ?? '');
+
+                    $threadFileName = "{$conversationFolder}/thread_{$threadId}_{$creator}_{$threadCreatedAt}.json";
+                    file_put_contents($threadFileName, json_encode($thread, JSON_PRETTY_PRINT));
+                }
+
+                // Prepare row for CSV export
                 $ticket = [
-                    'id' => $conversation['id'],
+                    'id' => $conversationId,
                     'mailbox' => $conversation['mailboxId'],
                     'status' => $conversation['status'],
-                    'name' => $conversation['primaryCustomer']['first'] . ' ' . $conversation['primaryCustomer']['last'],
+                    'name' => $customerName,
                     'email' => $conversation['primaryCustomer']['email'] ?? '',
                     'ticket' => $conversation['_links']['web']['href'] ?? '',
                     'tags' => fetchTags($conversation),
                     'date_received' => $createdAt,
                     'initial_message' => $conversation['_embedded']['threads'][0]['body'] ?? '',
+                    'threads_count' => count($threads),
                 ];
 
                 if (!$headerWritten) {
@@ -205,9 +267,12 @@ function fetchAndStreamConversations($startDate, $endDate, $accessToken, $filena
         }
 
         $page++;
+        $total_pages = $data['page']['totalPages'];
+        $total_elements = $data['page']['totalElements'];
     } while ($data['page']['totalPages'] >= $page);
 
     fclose($fp);
+    echo "Conversations and threads export completed!\n\n";
 }
 
 function main() {
