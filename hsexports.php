@@ -234,9 +234,7 @@ function fetchAndStreamConversations($startDate, $endDate, $accessToken, $filena
             $query['mailbox'] = $selectedMailboxId['id'];
         }
 
-        $response = makeApiGetRequest($client, 'conversations', [
-            'query' => $query,
-        ]);
+        $response = makeApiGetRequest($client, 'conversations', $query);
         
         $data = json_decode($response->getBody(), true);
         
