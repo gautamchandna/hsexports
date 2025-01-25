@@ -253,7 +253,7 @@ function fetchAndStreamConversations($startDate, $endDate, $accessToken, $filena
 
                 $customerName = trim(($conversation['primaryCustomer']['first'] ?? '') . ' ' . ($conversation['primaryCustomer']['last'] ?? ''));
                 $customerName = preg_replace('/[^a-zA-Z0-9_ -]/', '', $customerName); // Sanitize name
-                $customerName = !empty($customerName) ? $customerName : "-";
+                $customerName = trim($customerName) !== "" ? $customerName : "-";
                 $createdAt = formatTimestamp($conversation['_embedded']['threads'][0]['createdAt'] ?? $conversation['createdAt'] ?? '');
                 $conversationId = $conversation['id'];
 
