@@ -33,6 +33,39 @@ function setupEnv() {
     exit();
 }
 
+function makeApiGetRequest($client, $url, $queryParams = []) {
+    while (true) {
+        try {
+            $response = $client->get($url, ['query' => $queryParams]);
+
+            // Extract rate limit headers
+            $remaining = $response->getHeader('X-RateLimit-Remaining-Minute')[0] ?? 1;
+            $retryAfter = $response->getHeader('X-RateLimit-Retry-After')[0] ?? null;
+
+            if ($retryAfter) {
+                echo "Rate limit reached. Waiting for $retryAfter seconds...\n";
+                sleep((int)$retryAfter);
+                continue; // Retry after sleep
+            }
+
+            if ((int)$remaining <= 1) { // If only 1 requests are left, pause
+                echo "Approaching rate limit. Pausing for 1 min for safety...\n";
+                sleep(60); // Wait 1 minute before continuing
+            }
+
+            return $response;
+        } catch (\GuzzleHttp\Exception\ClientException $e) {
+            if ($e->getResponse()->getStatusCode() == 429) {
+                $retryAfter = $e->getResponse()->getHeader('X-RateLimit-Retry-After')[0] ?? 60;
+                echo "Rate limit exceeded! Waiting for $retryAfter seconds...\n";
+                sleep((int)$retryAfter);
+                continue; // Retry the request
+            }
+            throw $e; // Other API errors should not be ignored
+        }
+    }
+}
+
 // Function to get OAuth Access Token from HelpScout
 function getAccessToken() {
     $client = new Client();
@@ -153,7 +186,7 @@ function fetchThreads($conversationId, $accessToken) {
         ],
     ]);
 
-    $response = $client->get("conversations/{$conversationId}/threads");
+    $response = makeApiGetRequest($client, "conversations/{$conversationId}/threads");
     return json_decode($response->getBody(), true)['_embedded']['threads'] ?? [];
 }
 
@@ -201,7 +234,7 @@ function fetchAndStreamConversations($startDate, $endDate, $accessToken, $filena
             $query['mailbox'] = $selectedMailboxId['id'];
         }
 
-        $response = $client->get('conversations', [
+        $response = makeApiGetRequest($client, 'conversations', [
             'query' => $query,
         ]);
         
@@ -222,11 +255,18 @@ function fetchAndStreamConversations($startDate, $endDate, $accessToken, $filena
 
                 $customerName = trim(($conversation['primaryCustomer']['first'] ?? '') . ' ' . ($conversation['primaryCustomer']['last'] ?? ''));
                 $customerName = preg_replace('/[^a-zA-Z0-9_ -]/', '', $customerName); // Sanitize name
+                $customerName = !empty($customerName) ? $customerName : "-";
                 $createdAt = formatTimestamp($conversation['_embedded']['threads'][0]['createdAt'] ?? $conversation['createdAt'] ?? '');
                 $conversationId = $conversation['id'];
 
+                // Create folder for mailbox
+                $mailboxFolder = "{$exportPath}/{$conversation['mailboxId']}";
+                if (!file_exists($mailboxFolder)) {
+                    mkdir($mailboxFolder, 0777, true);
+                }
+
                 // Create folder for conversation
-                $conversationFolder = "{$exportPath}/{$conversationId}_{$customerName}_{$createdAt}";
+                $conversationFolder = "{$mailboxFolder}/{$createdAt}_{$conversationId}_{$customerName}";
                 if (!file_exists($conversationFolder)) {
                     mkdir($conversationFolder, 0777, true);
                 }
@@ -239,7 +279,7 @@ function fetchAndStreamConversations($startDate, $endDate, $accessToken, $filena
                     $threadId = $thread['id'];
                     $threadCreatedAt = formatTimestamp($thread['createdAt'] ?? '');
 
-                    $threadFileName = "{$conversationFolder}/thread_{$threadId}_{$creator}_{$threadCreatedAt}.json";
+                    $threadFileName = "{$conversationFolder}/thread_{$threadCreatedAt}_{$threadId}_{$creator}.json";
                     file_put_contents($threadFileName, json_encode($thread, JSON_PRETTY_PRINT));
                 }
 
