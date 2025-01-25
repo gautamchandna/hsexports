@@ -116,6 +116,23 @@ function preSanitizeHtml($html) {
     return $html;
 }
 
+function sanitizeFileOrFoldername($name) {
+
+    $name = preg_replace('/[^a-zA-Z0-9_ -]/', '', $name);
+    
+    // Remove problematic characters
+    $name = preg_replace('/[\/\\\\:*?"<>|]/', '', $name);
+    
+    // Replace multiple spaces/tabs with a single space
+    $name = preg_replace('/\s+/', ' ', $name);
+    
+    // Trim leading and trailing spaces
+    $name = trim($name);
+
+    // If the name is empty after cleaning, use a placeholder
+    return $name !== '' ? $name : '-';
+}
+
 // Windows cannot handle folder and file names with : in them
 function formatTimestamp($timestamp) {
     return date('Y-m-d-H-i-s', strtotime($timestamp));
@@ -252,8 +269,7 @@ function fetchAndStreamConversations($startDate, $endDate, $accessToken, $filena
                 }
 
                 $customerName = trim(($conversation['primaryCustomer']['first'] ?? '') . ' ' . ($conversation['primaryCustomer']['last'] ?? ''));
-                $customerName = preg_replace('/[^a-zA-Z0-9_ -]/', '', $customerName); // Sanitize name
-                $customerName = trim($customerName) !== "" ? $customerName : "-";
+                $customerName = sanitizeFileOrFoldername($customerName);
                 $createdAt = formatTimestamp($conversation['_embedded']['threads'][0]['createdAt'] ?? $conversation['createdAt'] ?? '');
                 $conversationId = $conversation['id'];
 
@@ -273,7 +289,7 @@ function fetchAndStreamConversations($startDate, $endDate, $accessToken, $filena
                 $threads = fetchThreads($conversationId, $accessToken);
                 foreach ($threads as $thread) {
                     $creator = trim(($thread['createdBy']['first'] ?? '') . ' ' . ($thread['createdBy']['last'] ?? ''));
-                    $creator = preg_replace('/[^a-zA-Z0-9_ -]/', '', $creator); // Sanitize creator name
+                    $creator = sanitizeFileOrFoldername($creator); // Sanitize creator name
                     $threadId = $thread['id'];
                     $threadCreatedAt = formatTimestamp($thread['createdAt'] ?? '');
 
