@@ -85,6 +85,16 @@ function getAccessToken() {
 function parseDateRange($dateInput) {
     $dateInput = strtolower(trim($dateInput));
 
+    // Match a single full year (e.g., "2024")
+    if (preg_match('/^(\d{4})$/', $dateInput, $matches)) {
+        return ["{$matches[1]}-01-01", "{$matches[1]}-12-31"];
+    }
+
+    // Match a range of full years (e.g., "2024 - 2026")
+    if (preg_match('/^(\d{4})\s*-\s*(\d{4})$/', $dateInput, $matches)) {
+        return ["{$matches[1]}-01-01", "{$matches[2]}-12-31"];
+    }
+
     // Match single month-year pattern (e.g., "May 2024")
     if (preg_match('/^(\w+)\s+(\d{4})$/', $dateInput, $matches)) {
         $startDate = date("Y-m-d", strtotime("first day of {$matches[1]} {$matches[2]}"));
@@ -99,7 +109,24 @@ function parseDateRange($dateInput) {
         return [$startDate, $endDate];
     }
 
-    throw new Exception("Invalid date format. Please use 'Month Year' or 'Month - Month Year'.");
+    throw new Exception("Invalid date format. Use 'Month Year', 'Month - Month Year', 'YYYY', or 'YYYY - YYYY'.");
+}
+
+// Split an inclusive [startDate, endDate] range into per-year chunks so each
+// year is fetched (and written to its own CSV) separately. This keeps single
+// queries within HelpScout's pagination limits and matches the per-year export
+// file naming. A sub-year range collapses to a single chunk.
+function splitByYear($startDate, $endDate) {
+    $startYear = (int)substr($startDate, 0, 4);
+    $endYear = (int)substr($endDate, 0, 4);
+
+    $chunks = [];
+    for ($year = $startYear; $year <= $endYear; $year++) {
+        $chunkStart = ($year === $startYear) ? $startDate : "{$year}-01-01";
+        $chunkEnd = ($year === $endYear) ? $endDate : "{$year}-12-31";
+        $chunks[] = [$chunkStart, $chunkEnd];
+    }
+    return $chunks;
 }
 
 // Function to sanitize HTML before processing
@@ -138,8 +165,8 @@ function formatTimestamp($timestamp) {
     return date('Y-m-d-H-i-s', strtotime($timestamp));
 }
 
-// Function to fetch mailboxes and prompt for selection
-function selectMailbox($accessToken) {
+// Fetch the list of mailboxes from HelpScout
+function getMailboxes($accessToken) {
     $client = new Client([
         'base_uri' => 'https://api.helpscout.net/v2/',
         'headers' => [
@@ -155,8 +182,55 @@ function selectMailbox($accessToken) {
         throw new Exception("No mailboxes found.");
     }
 
-    $mailboxes = $data['_embedded']['mailboxes'];
+    return $data['_embedded']['mailboxes'];
+}
 
+// Resolve a mailbox from a CLI argument: "all", a numeric ID, or a (partial)
+// name match. Returns 'all' or a single mailbox array. Throws if nothing — or
+// more than one thing — matches, listing what is available.
+function resolveMailboxArg($mailboxes, $arg) {
+    $arg = trim($arg);
+
+    if (strcasecmp($arg, 'all') === 0) {
+        return 'all';
+    }
+
+    // Exact ID match
+    foreach ($mailboxes as $mailbox) {
+        if ((string)$mailbox['id'] === $arg) {
+            return $mailbox;
+        }
+    }
+
+    // Exact (case-insensitive) name match
+    foreach ($mailboxes as $mailbox) {
+        if (strcasecmp($mailbox['name'], $arg) === 0) {
+            return $mailbox;
+        }
+    }
+
+    // Partial name match — only if unambiguous
+    $partial = array_values(array_filter($mailboxes, function ($mailbox) use ($arg) {
+        return stripos($mailbox['name'], $arg) !== false;
+    }));
+    if (count($partial) === 1) {
+        return $partial[0];
+    }
+    if (count($partial) > 1) {
+        $names = implode(', ', array_map(function ($mailbox) {
+            return "{$mailbox['name']} (ID: {$mailbox['id']})";
+        }, $partial));
+        throw new Exception("Mailbox '$arg' is ambiguous. Matches: $names");
+    }
+
+    $available = implode(', ', array_map(function ($mailbox) {
+        return "{$mailbox['name']} (ID: {$mailbox['id']})";
+    }, $mailboxes));
+    throw new Exception("No mailbox matching '$arg'. Available: $available, or 'all'.");
+}
+
+// Prompt the user to pick a mailbox interactively. Returns 'all' or a mailbox.
+function promptForMailbox($mailboxes) {
     // Add "All Mailboxes" as the first option
     echo "1. All Mailboxes\n";
     foreach ($mailboxes as $index => $mailbox) {
@@ -331,19 +405,44 @@ function fetchAndStreamConversations($startDate, $endDate, $accessToken, $filena
 
 function main() {
     global $argv;
-    if (count($argv) !== 2) {
-        echo "Usage: php script.php \"Month Year\" or \"Month - Month Year\"\n";
+    if (count($argv) < 2 || count($argv) > 3) {
+        echo "Usage: php hsexports.php <date-range> [mailbox]\n";
+        echo "  <date-range>  \"Month Year\", \"Month - Month Year\", \"YYYY\", or \"YYYY - YYYY\"\n";
+        echo "  [mailbox]     mailbox name (full or partial), numeric ID, or \"all\".\n";
+        echo "                Omit to choose interactively.\n";
         exit(1);
     }
 
     [$startDate, $endDate] = parseDateRange($argv[1]);
+    if (strcmp($startDate, $endDate) > 0) {
+        exit("Start date ($startDate) is after end date ($endDate).\n");
+    }
+
     $accessToken = getAccessToken();
+    $mailboxes = getMailboxes($accessToken);
 
-    // Prompt user to select a mailbox
-    $selectedMailbox = selectMailbox($accessToken);
+    // Resolve the mailbox from the CLI arg, or prompt interactively if omitted
+    $selectedMailbox = isset($argv[2])
+        ? resolveMailboxArg($mailboxes, $argv[2])
+        : promptForMailbox($mailboxes);
 
-    $filename = __DIR__ . '/export-' . $startDate . '-to-' . $endDate . '-' . ($selectedMailbox === 'all' ? 'all-mailboxes' : str_replace(' ', '-', strtolower($selectedMailbox['name']))) . '.csv';
-    fetchAndStreamConversations($startDate, $endDate, $accessToken, $filename, $selectedMailbox);
+    $mailboxLabel = ($selectedMailbox === 'all')
+        ? 'all-mailboxes'
+        : str_replace(' ', '-', strtolower($selectedMailbox['name']));
+
+    // Fetch one year at a time, each into its own CSV
+    $chunks = splitByYear($startDate, $endDate);
+    if (count($chunks) > 1) {
+        echo "Exporting " . count($chunks) . " years separately: {$startDate} to {$endDate}\n";
+    }
+    foreach ($chunks as [$chunkStart, $chunkEnd]) {
+        $filename = __DIR__ . "/export-{$chunkStart}-to-{$chunkEnd}-{$mailboxLabel}.csv";
+        fetchAndStreamConversations($chunkStart, $chunkEnd, $accessToken, $filename, $selectedMailbox);
+    }
 }
 
-main();
+// Only run the exporter when this file is invoked directly — not when it is
+// required by another script (e.g. accesstoken.php) to reuse its functions.
+if (isset($argv[0]) && realpath($argv[0]) === __FILE__) {
+    main();
+}

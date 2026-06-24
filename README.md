@@ -29,11 +29,25 @@ Now you're ready to run the script.
 ## **Usage**
 Run the script using the PHP CLI:
 
-`php hsexports.php {start date} {end date}`
+`php hsexports.php "<date-range>" [mailbox]`
 
-The terminal will then list all of your available Helpscout Mailboxes for you to chose from. It will always list "All Mailboxes" as the last option. Simply enter the cooresponding number of that mailbox and hit enter. 
+**Date range** accepts natural formats:
+- `"May 2024"` — a single month
+- `"May - June 2024"` — a range of months within one year
+- `"2024"` — a full year
+- `"2024 - 2026"` — a range of years (fetched and saved one year per CSV)
 
-The script will now run and export your conversations to a local .csv file with the following format: `export-{start date}-to-{end date}.csv` 
+**Mailbox** (optional) — pass a mailbox name (full or partial, e.g. `"POP Support"`), a numeric mailbox ID, or `all`. Omit it and the script lists your mailboxes (with "All Mailboxes" as option 1) for you to pick interactively.
+
+Examples:
+
+```
+php hsexports.php "May 2024"                 # interactive mailbox picker
+php hsexports.php "2025" "POP Support"        # one mailbox, non-interactive
+php hsexports.php "2024 - 2026" all           # every mailbox, three years
+```
+
+Conversations and their threads are written under `conversations/{mailboxId}/`, and a summary CSV is written per year as `export-{start date}-to-{end date}-{mailbox}.csv`.
 
 ## **Tips**
 1. The Helpscout API is slow and because we're including the initial message in the export, it can be a serious memory hog. So I recommend exporting one month at a time, or even one week at a time depending on the size of your inbox. 
