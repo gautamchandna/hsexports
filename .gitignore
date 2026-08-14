@@ -6,3 +6,6 @@
 # Exported HelpScout data — contains real customer PII, never commit
 /conversations/
 HELPSCOUT-*/
+
+# Windows/WSL alternate-data-stream metadata — never wanted in git.
+*:Zone.Identifier
